@@ -14,6 +14,25 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 ROUTE_COOLDOWN_S = 90.0
 ROUTE_FAILURE_LIMIT = 3
 PROVIDER = "tryingopen"
+COMPARE_PROVIDER = "tryingopen-compare"
+COMPARE_MODELS: Tuple[Dict[str, Any], ...] = (
+    {
+        "id": "openai/gpt-5.6-terra",
+        "name": "GPT-5.6 Terra",
+        "context_window": 1050000,
+        "features": ("tool-use",),
+        "price_per_mtok": 2.0,
+        "provider": COMPARE_PROVIDER,
+    },
+    {
+        "id": "anthropic/claude-sonnet-5",
+        "name": "Claude Sonnet 5",
+        "context_window": 1000000,
+        "features": ("tool-use",),
+        "price_per_mtok": 2.0,
+        "provider": COMPARE_PROVIDER,
+    },
+)
 _CHUNK_RE = re.compile(r"/_next/static/chunks/[A-Za-z0-9._~\-]+\.js(?:\?[^\s\"']*)?")
 _RECORD_HEAD = re.compile(r"\{id:\"([a-z0-9][a-z0-9.\-]*/[a-z0-9][a-z0-9.\-]*)\",name:\"([^\"]+)\"")
 _CONTEXT_RE = re.compile(r"\bcontext:\"([^\"]+)\"")
@@ -134,6 +153,8 @@ def _fetch_catalog() -> List[Dict[str, Any]]:
             return sorted(records, key=lambda r: r["price_per_mtok"] if r["price_per_mtok"] is not None else 9999.0)
     return []
 def _build_cards(rows: List[Dict[str, Any]]) -> Tuple[List[ModelCard], Dict[str, ModelCard]]:
+    known = {row["id"] for row in rows}
+    rows = list(rows) + [dict(r) for r in COMPARE_MODELS if r["id"] not in known]
     cards: List[ModelCard] = []
     by_key: Dict[str, ModelCard] = {}
     used_ids: Dict[str, int] = {}
@@ -164,15 +185,16 @@ def _build_cards(rows: List[Dict[str, Any]]) -> Tuple[List[ModelCard], Dict[str,
             if hv not in variant_aliases and hv.lower() != card_id.lower():
                 variant_aliases.append(hv)
         aliases = tuple(dict.fromkeys(list(base_aliases) + variant_aliases))
+        provider = row.get("provider") or PROVIDER
         route = Route(
-            provider=PROVIDER,
+            provider=provider,
             raw_id=raw_id,
             mid=raw_id,
             pid=name,
             slug=card_id,
             context_window=row["context_window"],
             features=row["features"],
-            label=f"{name} @ {PROVIDER}",
+            label=f"{name} @ {provider}",
             aliases=aliases,
         )
         card = ModelCard(

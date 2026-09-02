@@ -25,7 +25,7 @@ OUTAGE_MARKERS = (
     "try again later", "overloaded", "temporarily unavailable",
     "upstream 500", "upstream 502", "upstream 503", "upstream 504",
     "didn't respond", "did not respond", "that model didn't respond",
-    "run out of api credit for the moment",
+    "run out of api credit for the moment", "compare quota exhausted",
 )
 def _is_outage(message: str) -> bool:
     low = message.lower()

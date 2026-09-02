@@ -1,4 +1,5 @@
 from __future__ import annotations
+import codecs
 import itertools
 import json
 import random as _random
@@ -9,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+import httpx
 import requests
 from rh_credentials import (
     Credential,
@@ -17,8 +19,9 @@ from rh_credentials import (
     DEFAULT_USER_AGENT,
     ensure_fresh,
 )
-from rh_models import ModelCard, ModelRegistry, Route, REGISTRY
+from rh_models import COMPARE_PROVIDER, ModelCard, ModelRegistry, Route, REGISTRY
 CHAT_ENDPOINT = "https://www.tryingopen.com/api/open"
+COMPARE_ENDPOINT = "https://www.tryingopen.com/api/compare"
 SITE_ORIGIN = "https://www.tryingopen.com"
 EFFORT_MAP = {"low": "quick", "minimal": "quick", "quick": "quick", "medium": "balanced", "balanced": "balanced", "high": "deep", "xhigh": "deep", "max": "deep", "deep": "deep"}
 DEFAULT_EFFORT = "balanced"
@@ -41,6 +44,14 @@ class _RouteRejected(RuntimeError):
     def __init__(self, message: str, status: Optional[int] = None) -> None:
         super().__init__(message)
         self.status = status
+_HTTP2_CLIENT: Optional[httpx.Client] = None
+_HTTP2_CLIENT_LOCK = threading.Lock()
+def _http2_client() -> httpx.Client:
+    global _HTTP2_CLIENT
+    with _HTTP2_CLIENT_LOCK:
+        if _HTTP2_CLIENT is None:
+            _HTTP2_CLIENT = httpx.Client(http2=True, timeout=httpx.Timeout(10.0, read=300.0))
+        return _HTTP2_CLIENT
 def _flatten_content(content: Any) -> str:
     if content is None:
         return ""
@@ -238,15 +249,24 @@ def _parse_plaintext_tool_calls(text: str) -> Optional[List[Dict[str, Any]]]:
             args = "{}"
         calls.append({"name": name, "arguments": args})
     return calls or None
+def _plain_compare_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for msg in messages:
+        parts = msg.get("parts") or []
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
+        if text:
+            out.append({"role": msg.get("role") or "user", "content": text})
+    return out
+
 class TryingOpenClient:
     def __init__(self, credential: Credential, timeout: Tuple[int, int] = HTTP_TIMEOUT) -> None:
         self.credential = credential
         self.timeout = timeout
         self.session = requests.Session()
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, accept: str = "text/event-stream") -> Dict[str, str]:
         ensure_fresh(self.credential)
         headers = {
-            "Accept": "text/event-stream",
+            "Accept": accept,
             "Content-Type": "application/json",
             "Origin": SITE_ORIGIN,
             "Referer": SITE_ORIGIN + "/",
@@ -311,6 +331,53 @@ class TryingOpenClient:
                             repeat_text = text if text else repeat_text
                             repeat_streak = 1
                     yield ev
+    def stream_compare(self, messages: List[Dict[str, Any]], route: Route) -> Generator[Dict[str, Any], None, None]:
+        payload: Dict[str, Any] = {
+            "model": route.raw_id,
+            "messages": _plain_compare_messages(messages),
+        }
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            with _http2_client().stream(
+                "POST", COMPARE_ENDPOINT, headers=self._headers(accept="*/*"), json=payload,
+            ) as resp:
+                if resp.status_code != 200:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    self._raise_compare_rejection(resp.status_code, body, resp.headers.get("Retry-After"))
+                event_count = 0
+                repeat_streak = 0
+                repeat_text = None
+                for chunk in resp.iter_raw():
+                    if not chunk:
+                        continue
+                    text = decoder.decode(chunk)
+                    if not text:
+                        continue
+                    event_count += 1
+                    if event_count > MAX_STREAM_EVENTS:
+                        raise _RouteRejected("upstream stream exceeded max chunks (possible loop)")
+                    if text == repeat_text:
+                        repeat_streak += 1
+                        if repeat_streak >= REPEAT_STREAK_LIMIT:
+                            raise _RouteRejected("upstream repetition loop (model stuck)")
+                    else:
+                        repeat_text = text
+                        repeat_streak = 1
+                    yield {"type": "content", "text": text}
+        except httpx.HTTPError as exc:
+            raise requests.HTTPError(f"compare transport error: {exc}") from exc
+    def _raise_compare_rejection(self, status: int, body: str, retry_after: Optional[str] = None) -> None:
+        message = body[:300]
+        try:
+            message = str(json.loads(body).get("error") or message)
+        except Exception:
+            pass
+        if status == 429:
+            suffix = f" (retry after {retry_after}s)" if retry_after else ""
+            raise _RouteRejected(f"compare quota exhausted: {message}{suffix}", status=429)
+        if 500 <= status < 600:
+            raise requests.HTTPError(f"upstream {status}: {message}")
+        raise _RouteRejected(f"status {status}: {message}", status=status)
     @staticmethod
     def _raise_for_rejection(resp: requests.Response) -> None:
         status = resp.status_code
@@ -560,7 +627,11 @@ class RHRouter:
                             upstream_messages = to_ui_messages(_emulation_messages(messages, tools, tool_choice))
                         calls: Optional[List[Dict[str, Any]]] = None
                         preamble = ""
-                        for ev in client.stream(upstream_messages, route, effort=effort):
+                        if route.provider == COMPARE_PROVIDER:
+                            source = client.stream_compare(upstream_messages, route)
+                        else:
+                            source = client.stream(upstream_messages, route, effort=effort)
+                        for ev in source:
                             etype = ev.get("type")
                             if etype == "error":
                                 msg = str(ev.get("message", "upstream error"))
@@ -622,7 +693,7 @@ class RHRouter:
                         return
                     except _RouteRejected as exc:
                         last_error = exc
-                        hard = _is_tool_error(str(exc)) or _is_site_credit_outage(str(exc))
+                        hard = _is_tool_error(str(exc)) or _is_site_credit_outage(str(exc)) or (exc.status in (400, 401, 403, 404, 429))
                         saw_hard = saw_hard or hard
                         saw_transient = saw_transient or not hard
                         self.registry.report_route(route.mid, ok=False, hard=hard)
@@ -746,7 +817,7 @@ def _is_site_credit_outage(message: str) -> bool:
     low = message.lower()
     markers = (
         "run out of api credit", "out of credit", "insufficient credit",
-        "quota exceeded", "quota exhausted",
+        "quota exceeded", "quota exhausted", "compare quota exhausted",
     )
     return any(m in low for m in markers)
 def _is_site_outage(message: str) -> bool:
