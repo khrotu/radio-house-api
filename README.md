@@ -24,16 +24,23 @@ The current model list is not finalised for the final release. Expect models to 
 | `claude-sonnet-5` | 977k |
 | `deepseek-v4-flash-0731` | 1M |
 | `deepseek-v4-pro-0813` | 1M |
+| `deepseek-v4.1-flash` | 1M |
 | `gemma-4-26b-a4b-it` | 256k |
 | `gemma-4-31b-it` | 256k |
-| `glm-5.2` | 1M |
+| `glm-5.3` | 1M |
 | `glm-5.3-flash` | 1M |
 | `gpt-5.6-terra` | 1025k |
 | `gpt-oss-120b` | 128k |
+| `inkling` | 1M |
 | `inkling-small` | 524k |
-| `minimax-m3` | 1M |
+| `kimi-k3` | 1M |
+| `ling-3.0-flash-vl` | 131k |
+| `mimo-v2.6-flash` | 1M |
+| `mimo-v2.6-pro` | 1M |
 | `muse-glimmer-30b` | 131k |
+| `nemotron-3-ultra-550b-a55b` | 262k |
 | `nemotron-3.5-lightning` | 262k |
+| `qwen3.8-2.4t-a95b` | 1M |
 | `qwen3.8-27b` | 262k |
 | `qwen3.8-flash` | 1M |
 
