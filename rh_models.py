@@ -37,6 +37,10 @@ _CHUNK_RE = re.compile(r"/_next/static/chunks/[A-Za-z0-9._~\-]+\.js(?:\?[^\s\"']
 _RECORD_HEAD = re.compile(r"\{id:\"([a-z0-9][a-z0-9.\-]*/[a-z0-9][a-z0-9.\-]*)\",name:\"([^\"]+)\"")
 _CONTEXT_RE = re.compile(r"\bcontext:\"([^\"]+)\"")
 _PRICE_RE = re.compile(r"\bpricePerMTok:([0-9.]+)")
+_CLOUD_MODEL_RE = re.compile(r"\bcloudModelId:\"([^\"]+)\"")
+EXTRA_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "offlinebase/base-router": ("lfm-2.5-vl-3b", "lfm2.5-vl-3b"),
+}
 def _slugify(pid: str) -> str:
     s = pid.strip().lower()
     s = re.sub(r"[@+_/]", "-", s)
@@ -80,6 +84,7 @@ class Route:
     supported_parameters: Tuple[str, ...] = ()
     label: str = ""
     aliases: Tuple[str, ...] = ()
+    cloud_fallback: str = ""
 @dataclass(frozen=True)
 class ModelCard:
     id: str
@@ -124,12 +129,14 @@ def _parse_catalog(js: str) -> List[Dict[str, Any]]:
         if "supportsImages:!0" in seg:
             features.append("images")
         pm = _PRICE_RE.search(seg)
+        cfm = _CLOUD_MODEL_RE.search(seg)
         records.append({
             "id": raw_id,
             "name": name,
             "context_window": _parse_context(cm.group(1)),
             "features": tuple(features),
             "price_per_mtok": float(pm.group(1)) if pm else None,
+            "cloud_fallback": cfm.group(1) if cfm else None,
         })
         seen.add(raw_id)
     return records
@@ -184,7 +191,7 @@ def _build_cards(rows: List[Dict[str, Any]]) -> Tuple[List[ModelCard], Dict[str,
             hv = card_id.replace(".", "-")
             if hv not in variant_aliases and hv.lower() != card_id.lower():
                 variant_aliases.append(hv)
-        aliases = tuple(dict.fromkeys(list(base_aliases) + variant_aliases))
+        aliases = tuple(dict.fromkeys(list(base_aliases) + variant_aliases + list(EXTRA_ALIASES.get(raw_id, ()))))
         provider = row.get("provider") or PROVIDER
         route = Route(
             provider=provider,
@@ -196,6 +203,7 @@ def _build_cards(rows: List[Dict[str, Any]]) -> Tuple[List[ModelCard], Dict[str,
             features=row["features"],
             label=f"{name} @ {provider}",
             aliases=aliases,
+            cloud_fallback=row.get("cloud_fallback") or "",
         )
         card = ModelCard(
             id=card_id,

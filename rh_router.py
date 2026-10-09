@@ -278,14 +278,18 @@ class TryingOpenClient:
     @staticmethod
     def _build_payload(messages: List[Dict[str, Any]], route: Route, effort: str) -> Dict[str, Any]:
         now_hex = uuid.uuid4().hex
-        return {
+        payload: Dict[str, Any] = {
             "id": f"chat-{now_hex[:16]}",
             "trigger": "submit-message",
             "messageId": f"msg-{uuid.uuid4().hex[:24]}",
             "model": route.raw_id,
-            "effort": effort,
             "messages": messages,
+            "effort": effort,
         }
+        if route.cloud_fallback:
+            payload["provider"] = "auto"
+            payload["cloudFallback"] = route.cloud_fallback
+        return payload
     def stream(self, messages: List[Dict[str, Any]], route: Route, effort: str = DEFAULT_EFFORT) -> Generator[Dict[str, Any], None, None]:
         payload = self._build_payload(messages, route, effort)
         with self.session.post(
